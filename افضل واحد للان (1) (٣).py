@@ -96,6 +96,51 @@ ANSI_HEADER_COLORS = [
 ]
 
 
+# ----------------------------------------------------------------------------
+# Optional configuration defaults & editor autorun settings
+# ----------------------------------------------------------------------------
+
+_MEME_BASES = {
+    "DOGE",
+    "SHIB",
+    "PEPE",
+    "FLOKI",
+    "BONK",
+    "WIF",
+    "BABYDOGE",
+    "MOG",
+    "DEGEN",
+    "PONKE",
+    "BODEN",
+    "MEME",
+    "AIDOGE",
+    "MEOW",
+    "GME",
+    "TOSHI",
+    "HOPPY",
+    "KITTY",
+    "LADYS",
+    "CREAM",
+    "PIPI",
+    "JEET",
+    "CHILLGUY",
+    "HUAHUA",
+}
+
+_DEFAULT_EXCLUDE_PATTERNS = "INU,DOGE,PEPE,FLOKI,BONK,SHIB,BABY,CAT,MOON,MEME"
+
+
+@dataclass(frozen=True)
+class _EditorAutorunDefaults:
+    timeframe: str = "1m"
+    candle_limit: int = 600
+    max_symbols: int = 60
+    recent_bars: int = 2
+
+
+EDITOR_AUTORUN_DEFAULTS = _EditorAutorunDefaults()
+
+
 def _normalize_direction(value: Any) -> Optional[str]:
     if isinstance(value, str):
         token = value.strip().lower()
@@ -8472,24 +8517,6 @@ except Exception:
     requests = None  # type: ignore
 
 # ----------------------------- Filters & Helpers -----------------------------
-_MEME_BASES = {
-    "DOGE","SHIB","PEPE","FLOKI","BONK","WIF","BABYDOGE","MOG","DEGEN","PONKE","BODEN","MEME",
-    "AIDOGE","MEOW","GME","TOSHI","HOPPY","KITTY","LADYS","CREAM","PIPI","JEET","CHILLGUY","HUAHUA"
-}
-_DEFAULT_EXCLUDE_PATTERNS = "INU,DOGE,PEPE,FLOKI,BONK,SHIB,BABY,CAT,MOON,MEME"
-
-
-@dataclass(frozen=True)
-class _EditorAutorunDefaults:
-    timeframe: str = "1m"
-    candle_limit: int = 600
-    max_symbols: int = 60
-    recent_bars: int = 2
-
-
-EDITOR_AUTORUN_DEFAULTS = _EditorAutorunDefaults()
-
-
 def _pct_24h(t: Dict) -> float:
     v = t.get("percentage")
     if v is None and isinstance(t.get("info"), dict):
@@ -8519,6 +8546,33 @@ def _normalize_list(csv_like: str) -> List[str]:
     if not csv_like:
         return []
     return [x.strip().upper() for x in csv_like.split(",") if x.strip()]
+
+
+def _percent_change_from_candles(candles: Sequence[Sequence[Any]]) -> Optional[float]:
+    if len(candles) < 2:
+        return None
+    try:
+        first_close = float(candles[0][4])
+        last_close = float(candles[-1][4])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if first_close == 0:
+        return None
+    return (last_close - first_close) / first_close * 100.0
+
+
+def _fetch_percent_change(
+    exchange: "ccxt.binanceusdm", symbol: str, timeframe: str, *, candles: int = 2
+) -> Optional[float]:
+    if candles < 2:
+        candles = 2
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=candles)
+    except Exception:
+        return None
+    if not ohlcv or len(ohlcv) < 2:
+        return None
+    return _percent_change_from_candles(ohlcv)
 
 # ----------------------------- CLI Settings ----------------------------------
 @dataclass
@@ -8553,6 +8607,8 @@ class _CLISettings:
     exclude_symbols: str = ""
     exclude_patterns: str = _DEFAULT_EXCLUDE_PATTERNS
     include_only: str = ""
+    pump_change_threshold: float = 0.0  # ≤ change % triggers exclusion
+    pump_timeframe: str = ""           # timeframe for pump filter (empty disables)
 
 def _get_secret(name: str) -> Optional[str]:
     return os.environ.get(name)
@@ -8594,6 +8650,16 @@ def _pick_symbols(cfg: _CLISettings, symbol_override: Optional[str] = None, max_
     excl_syms = set(_normalize_list(cfg.exclude_symbols))
     excl_patterns = set(_normalize_list(cfg.exclude_patterns))
     inc_only = set(_normalize_list(cfg.include_only))
+    pump_cache: Dict[str, Optional[float]] = {}
+
+    def pump_change(sym: str) -> Optional[float]:
+        if cfg.pump_change_threshold <= 0 or not cfg.pump_timeframe:
+            return None
+        if sym not in pump_cache:
+            pump_cache[sym] = _fetch_percent_change(
+                ex, sym, cfg.pump_timeframe, candles=2
+            )
+        return pump_cache[sym]
 
     def allow(sym: str) -> bool:
         u = sym.upper()
@@ -8611,6 +8677,9 @@ def _pick_symbols(cfg: _CLISettings, symbol_override: Optional[str] = None, max_
         if _pct_24h(t) < cfg.min_change:
             return False
         if _qv_24h(t) < cfg.min_volume:
+            return False
+        pump = pump_change(sym)
+        if pump is not None and pump >= cfg.pump_change_threshold:
             return False
         return True
 
@@ -8662,12 +8731,28 @@ def _parse_args_android() -> Tuple[_CLISettings, argparse.Namespace]:
     p.add_argument("--exclude-symbols", default="")
     p.add_argument("--exclude-patterns", default=_DEFAULT_EXCLUDE_PATTERNS)
     p.add_argument("--include-only", default="")
+    p.add_argument(
+        "--pump-threshold",
+        type=float,
+        default=0.0,
+        help="تخطي العملات التي ارتفعت على الأقل بهذه النسبة المئوية خلال الإطار الزمني المحدد",
+    )
+    p.add_argument(
+        "--pump-timeframe",
+        default="",
+        help="الإطار الزمني المستخدم لحساب نسبة الارتفاع في فلتر الضخ (اتركه فارغًا للتعطيل)",
+    )
     # misc
     p.add_argument("--recent", type=int, default=2)
     p.add_argument("--verbose", "-v", action="store_true", default=False)
     p.add_argument("--debug", action="store_true", default=False)
     p.add_argument("--tg", action="store_true", default=False)
     args, _ = p.parse_known_args()
+
+    if args.pump_threshold < 0:
+        p.error("--pump-threshold يجب أن يكون رقمًا غير سالب")
+    if args.pump_threshold > 0 and not args.pump_timeframe:
+        p.error("يجب تحديد --pump-timeframe عند استخدام --pump-threshold")
 
     cfg = _CLISettings(
         market='usdtm',  # forced futures-only
@@ -8693,6 +8778,8 @@ def _parse_args_android() -> Tuple[_CLISettings, argparse.Namespace]:
         exclude_symbols=args.exclude_symbols,
         exclude_patterns=args.exclude_patterns,
         include_only=args.include_only,
+        pump_change_threshold=args.pump_threshold,
+        pump_timeframe=args.pump_timeframe,
         drop_last_incomplete=args.drop_last,
     )
     return cfg, args
@@ -9474,6 +9561,8 @@ class Settings:
         self.structure_requires_wick = kw.get("structure_requires_wick", False)
         self.mtf_lookahead = kw.get("mtf_lookahead", False)
         self.zone_type = kw.get("zone_type", "Mother Bar")
+        self.pump_change_threshold = kw.get("pump_change_threshold", 0.0)
+        self.pump_timeframe = kw.get("pump_timeframe", "")
 
 def _parse_args_android():
     import argparse
@@ -9512,6 +9601,8 @@ def _parse_args_android():
     p.add_argument("--no-fvg", action="store_true")
     p.add_argument("--no-liquidity", action="store_true")
     p.add_argument("--liquidity-limit", type=int, default=20)
+    p.add_argument("--pump-threshold", type=float, default=0.0)
+    p.add_argument("--pump-timeframe", default="")
     p.add_argument("--bos-plus-window", type=int, default=2)
     p.add_argument("--no-bos-plus", action="store_true")
     p.add_argument("--no-ob-break", action="store_true")
@@ -9527,6 +9618,10 @@ def _parse_args_android():
         p.error("--max-symbols must be > 0")
     if args.recent <= 0:
         p.error("--recent يجب أن يكون رقمًا موجبًا")
+    if args.pump_threshold < 0:
+        p.error("--pump-threshold يجب أن يكون رقمًا غير سالب")
+    if args.pump_threshold > 0 and not args.pump_timeframe:
+        p.error("يجب تحديد --pump-timeframe عند استخدام --pump-threshold")
 
     zone_type = args.zone_type
     if args.use_mother_bar:
@@ -9575,6 +9670,8 @@ def _parse_args_android():
         zone_type=zone_type,
         drop_last_incomplete=args.drop_last,
         max_scan=args.max_symbols,
+        pump_change_threshold=args.pump_threshold,
+        pump_timeframe=args.pump_timeframe,
     )
     return cfg, args
 
@@ -9587,6 +9684,18 @@ def _pick_symbols(cfg, symbol_override:str|None, max_symbols_hint:int):
     universe = [s for s in universe if not any(b in s for b in ban)]
     tickers = ex.fetch_tickers()
     ranked = sorted(universe, key=lambda s: float(tickers.get(s,{}).get("quoteVolume") or 0), reverse=True)
+    if cfg.pump_change_threshold > 0 and cfg.pump_timeframe:
+        pump_cache: Dict[str, Optional[float]] = {}
+
+        def pumped(sym: str) -> bool:
+            if sym not in pump_cache:
+                pump_cache[sym] = _fetch_percent_change(
+                    ex, sym, cfg.pump_timeframe, candles=2
+                )
+            change = pump_cache[sym]
+            return change is not None and change >= cfg.pump_change_threshold
+
+        ranked = [sym for sym in ranked if not pumped(sym)]
     if symbol_override:
         return [symbol_override if symbol_override in markets else symbol_override + ":USDT"]
     k = min(int(cfg.max_scan), max_symbols_hint or len(ranked))
