@@ -96,6 +96,75 @@ ANSI_HEADER_COLORS = [
 ]
 
 
+# ----------------------------------------------------------------------------
+# Optional configuration defaults & editor autorun settings
+# ----------------------------------------------------------------------------
+
+_MEME_BASES = {
+    "DOGE",
+    "SHIB",
+    "PEPE",
+    "FLOKI",
+    "BONK",
+    "WIF",
+    "BABYDOGE",
+    "MOG",
+    "DEGEN",
+    "PONKE",
+    "BODEN",
+    "MEME",
+    "AIDOGE",
+    "MEOW",
+    "GME",
+    "TOSHI",
+    "HOPPY",
+    "KITTY",
+    "LADYS",
+    "CREAM",
+    "PIPI",
+    "JEET",
+    "CHILLGUY",
+    "HUAHUA",
+}
+
+_DEFAULT_EXCLUDE_PATTERNS = "INU,DOGE,PEPE,FLOKI,BONK,SHIB,BABY,CAT,MOON,MEME"
+
+
+@dataclass(frozen=True)
+class _EditorAutorunDefaults:
+    timeframe: str = "1m"
+    candle_limit: int = 600
+    max_symbols: int = 60
+    recent_bars: int = 2
+
+
+EDITOR_AUTORUN_DEFAULTS = _EditorAutorunDefaults()
+
+
+@dataclass(frozen=True)
+class _AlertDefaults:
+    enabled: bool = False
+    title_prefix: str = "SMC Alert"
+
+
+@dataclass(frozen=True)
+class _ScannerFilterDefaults:
+    market: str = "usdtm"
+    min_change: float = 5.0
+    min_volume: float = 30_000_000.0
+    max_scan: int = 60
+    allow_meme: bool = False
+    exclude_symbols: str = ""
+    exclude_patterns: str = _DEFAULT_EXCLUDE_PATTERNS
+    include_only: str = ""
+    pump_change_threshold: float = 0.0
+    pump_timeframe: str = ""
+
+
+ALERT_DEFAULTS = _AlertDefaults()
+SCANNER_FILTER_DEFAULTS = _ScannerFilterDefaults()
+
+
 def _normalize_direction(value: Any) -> Optional[str]:
     if isinstance(value, str):
         token = value.strip().lower()
@@ -8472,24 +8541,6 @@ except Exception:
     requests = None  # type: ignore
 
 # ----------------------------- Filters & Helpers -----------------------------
-_MEME_BASES = {
-    "DOGE","SHIB","PEPE","FLOKI","BONK","WIF","BABYDOGE","MOG","DEGEN","PONKE","BODEN","MEME",
-    "AIDOGE","MEOW","GME","TOSHI","HOPPY","KITTY","LADYS","CREAM","PIPI","JEET","CHILLGUY","HUAHUA"
-}
-_DEFAULT_EXCLUDE_PATTERNS = "INU,DOGE,PEPE,FLOKI,BONK,SHIB,BABY,CAT,MOON,MEME"
-
-
-@dataclass(frozen=True)
-class _EditorAutorunDefaults:
-    timeframe: str = "1m"
-    candle_limit: int = 600
-    max_symbols: int = 60
-    recent_bars: int = 2
-
-
-EDITOR_AUTORUN_DEFAULTS = _EditorAutorunDefaults()
-
-
 def _pct_24h(t: Dict) -> float:
     v = t.get("percentage")
     if v is None and isinstance(t.get("info"), dict):
@@ -8520,6 +8571,33 @@ def _normalize_list(csv_like: str) -> List[str]:
         return []
     return [x.strip().upper() for x in csv_like.split(",") if x.strip()]
 
+
+def _percent_change_from_candles(candles: Sequence[Sequence[Any]]) -> Optional[float]:
+    if len(candles) < 2:
+        return None
+    try:
+        first_close = float(candles[0][4])
+        last_close = float(candles[-1][4])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if first_close == 0:
+        return None
+    return (last_close - first_close) / first_close * 100.0
+
+
+def _fetch_percent_change(
+    exchange: "ccxt.binanceusdm", symbol: str, timeframe: str, *, candles: int = 2
+) -> Optional[float]:
+    if candles < 2:
+        candles = 2
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=candles)
+    except Exception:
+        return None
+    if not ohlcv or len(ohlcv) < 2:
+        return None
+    return _percent_change_from_candles(ohlcv)
+
 # ----------------------------- CLI Settings ----------------------------------
 @dataclass
 class _CLISettings:
@@ -8537,22 +8615,24 @@ class _CLISettings:
     liquidity_display_limit: int = 20
     drop_last_incomplete: bool = False
     # scanner controls
-    tg_enable: bool = False
-    tg_title_prefix: str = "SMC Alert"
+    tg_enable: bool = ALERT_DEFAULTS.enabled
+    tg_title_prefix: str = ALERT_DEFAULTS.title_prefix
     # matching indicator behavior
     ob_test_mode: str = "CLOSE"  # goes to demand_supply.mittigation_filt (canonicalized inside)
     zone_type: str = "Mother Bar"  # goes to order_block.poi_type
     bos_confirmation: str = "Close"
     strict_close_for_break: bool = False
     # filters
-    market: str = "usdtm"         # {usdtm, spot}
-    min_change: float = 5.0       # ≥ %
-    min_volume: float = 30_000_000.0  # ≥ USDT
-    max_scan: int = 60            # after filtering & sorting
-    allow_meme: bool = False
-    exclude_symbols: str = ""
-    exclude_patterns: str = _DEFAULT_EXCLUDE_PATTERNS
-    include_only: str = ""
+    market: str = SCANNER_FILTER_DEFAULTS.market  # {usdtm, spot}
+    min_change: float = SCANNER_FILTER_DEFAULTS.min_change  # ≥ %
+    min_volume: float = SCANNER_FILTER_DEFAULTS.min_volume  # ≥ USDT
+    max_scan: int = SCANNER_FILTER_DEFAULTS.max_scan  # after filtering & sorting
+    allow_meme: bool = SCANNER_FILTER_DEFAULTS.allow_meme
+    exclude_symbols: str = SCANNER_FILTER_DEFAULTS.exclude_symbols
+    exclude_patterns: str = SCANNER_FILTER_DEFAULTS.exclude_patterns
+    include_only: str = SCANNER_FILTER_DEFAULTS.include_only
+    pump_change_threshold: float = SCANNER_FILTER_DEFAULTS.pump_change_threshold  # ≤ change % triggers exclusion
+    pump_timeframe: str = SCANNER_FILTER_DEFAULTS.pump_timeframe  # timeframe for pump filter (empty disables)
 
 def _get_secret(name: str) -> Optional[str]:
     return os.environ.get(name)
@@ -8594,6 +8674,16 @@ def _pick_symbols(cfg: _CLISettings, symbol_override: Optional[str] = None, max_
     excl_syms = set(_normalize_list(cfg.exclude_symbols))
     excl_patterns = set(_normalize_list(cfg.exclude_patterns))
     inc_only = set(_normalize_list(cfg.include_only))
+    pump_cache: Dict[str, Optional[float]] = {}
+
+    def pump_change(sym: str) -> Optional[float]:
+        if cfg.pump_change_threshold <= 0 or not cfg.pump_timeframe:
+            return None
+        if sym not in pump_cache:
+            pump_cache[sym] = _fetch_percent_change(
+                ex, sym, cfg.pump_timeframe, candles=2
+            )
+        return pump_cache[sym]
 
     def allow(sym: str) -> bool:
         u = sym.upper()
@@ -8611,6 +8701,9 @@ def _pick_symbols(cfg: _CLISettings, symbol_override: Optional[str] = None, max_
         if _pct_24h(t) < cfg.min_change:
             return False
         if _qv_24h(t) < cfg.min_volume:
+            return False
+        pump = pump_change(sym)
+        if pump is not None and pump >= cfg.pump_change_threshold:
             return False
         return True
 
@@ -8655,22 +8748,38 @@ def _parse_args_android() -> Tuple[_CLISettings, argparse.Namespace]:
     p.add_argument("--no-ote-alert", action="store_true")
     p.add_argument("--no-mark-x", action="store_true")
     # filters
-    p.add_argument("--min-change", type=float, default=5.0)
-    p.add_argument("--min-volume", type=float, default=30_000_000.0)
-    p.add_argument("--max-scan", type=int, default=60)
-    p.add_argument("--allow-meme", action="store_true", default=False)
-    p.add_argument("--exclude-symbols", default="")
-    p.add_argument("--exclude-patterns", default=_DEFAULT_EXCLUDE_PATTERNS)
-    p.add_argument("--include-only", default="")
+    p.add_argument("--min-change", type=float, default=SCANNER_FILTER_DEFAULTS.min_change)
+    p.add_argument("--min-volume", type=float, default=SCANNER_FILTER_DEFAULTS.min_volume)
+    p.add_argument("--max-scan", type=int, default=SCANNER_FILTER_DEFAULTS.max_scan)
+    p.add_argument("--allow-meme", action="store_true", default=SCANNER_FILTER_DEFAULTS.allow_meme)
+    p.add_argument("--exclude-symbols", default=SCANNER_FILTER_DEFAULTS.exclude_symbols)
+    p.add_argument("--exclude-patterns", default=SCANNER_FILTER_DEFAULTS.exclude_patterns)
+    p.add_argument("--include-only", default=SCANNER_FILTER_DEFAULTS.include_only)
+    p.add_argument(
+        "--pump-threshold",
+        type=float,
+        default=SCANNER_FILTER_DEFAULTS.pump_change_threshold,
+        help="تخطي العملات التي ارتفعت على الأقل بهذه النسبة المئوية خلال الإطار الزمني المحدد",
+    )
+    p.add_argument(
+        "--pump-timeframe",
+        default=SCANNER_FILTER_DEFAULTS.pump_timeframe,
+        help="الإطار الزمني المستخدم لحساب نسبة الارتفاع في فلتر الضخ (اتركه فارغًا للتعطيل)",
+    )
     # misc
     p.add_argument("--recent", type=int, default=2)
     p.add_argument("--verbose", "-v", action="store_true", default=False)
     p.add_argument("--debug", action="store_true", default=False)
-    p.add_argument("--tg", action="store_true", default=False)
+    p.add_argument("--tg", action="store_true", default=ALERT_DEFAULTS.enabled)
     args, _ = p.parse_known_args()
 
+    if args.pump_threshold < 0:
+        p.error("--pump-threshold يجب أن يكون رقمًا غير سالب")
+    if args.pump_threshold > 0 and not args.pump_timeframe:
+        p.error("يجب تحديد --pump-timeframe عند استخدام --pump-threshold")
+
     cfg = _CLISettings(
-        market='usdtm',  # forced futures-only
+        market=SCANNER_FILTER_DEFAULTS.market,  # forced futures-only
         showHL=args.show_hl,
         showMn=args.show_mn,
         showISOB=True if args.show_isob is None else args.show_isob,
@@ -8693,6 +8802,8 @@ def _parse_args_android() -> Tuple[_CLISettings, argparse.Namespace]:
         exclude_symbols=args.exclude_symbols,
         exclude_patterns=args.exclude_patterns,
         include_only=args.include_only,
+        pump_change_threshold=args.pump_threshold,
+        pump_timeframe=args.pump_timeframe,
         drop_last_incomplete=args.drop_last,
     )
     return cfg, args
@@ -9443,8 +9554,8 @@ def fetch_ohlcv(ex, symbol, timeframe, limit):
 class Settings:
     def __init__(self, **kw):
         self.__dict__.update(kw)
-        self.market = 'usdtm'
-        self.max_scan = kw.get("max_scan", 60)
+        self.market = kw.get("market", SCANNER_FILTER_DEFAULTS.market)
+        self.max_scan = kw.get("max_scan", SCANNER_FILTER_DEFAULTS.max_scan)
         self.drop_last_incomplete = kw.get("drop_last_incomplete", False)
         self.showHL = kw.get("showHL", False)
         self.showMn = kw.get("showMn", False)
@@ -9474,6 +9585,8 @@ class Settings:
         self.structure_requires_wick = kw.get("structure_requires_wick", False)
         self.mtf_lookahead = kw.get("mtf_lookahead", False)
         self.zone_type = kw.get("zone_type", "Mother Bar")
+        self.pump_change_threshold = kw.get("pump_change_threshold", SCANNER_FILTER_DEFAULTS.pump_change_threshold)
+        self.pump_timeframe = kw.get("pump_timeframe", SCANNER_FILTER_DEFAULTS.pump_timeframe)
 
 def _parse_args_android():
     import argparse
@@ -9482,7 +9595,7 @@ def _parse_args_android():
     p.add_argument("--limit", "-l", type=int, default=EDITOR_AUTORUN_DEFAULTS.candle_limit)
     p.add_argument("--max-symbols", "-n", type=int, default=EDITOR_AUTORUN_DEFAULTS.max_symbols)
     p.add_argument("--mitigation", choices=["WICK","CLOSE"], default="CLOSE")
-    p.add_argument("--tg", action="store_true", default=False)
+    p.add_argument("--tg", action="store_true", default=ALERT_DEFAULTS.enabled)
     p.add_argument("--symbol", "-s", default="")
     p.add_argument("--verbose", "-v", action="store_true", default=False)
     p.add_argument("--recent", type=int, default=EDITOR_AUTORUN_DEFAULTS.recent_bars)
@@ -9512,6 +9625,8 @@ def _parse_args_android():
     p.add_argument("--no-fvg", action="store_true")
     p.add_argument("--no-liquidity", action="store_true")
     p.add_argument("--liquidity-limit", type=int, default=20)
+    p.add_argument("--pump-threshold", type=float, default=SCANNER_FILTER_DEFAULTS.pump_change_threshold)
+    p.add_argument("--pump-timeframe", default=SCANNER_FILTER_DEFAULTS.pump_timeframe)
     p.add_argument("--bos-plus-window", type=int, default=2)
     p.add_argument("--no-bos-plus", action="store_true")
     p.add_argument("--no-ob-break", action="store_true")
@@ -9527,6 +9642,10 @@ def _parse_args_android():
         p.error("--max-symbols must be > 0")
     if args.recent <= 0:
         p.error("--recent يجب أن يكون رقمًا موجبًا")
+    if args.pump_threshold < 0:
+        p.error("--pump-threshold يجب أن يكون رقمًا غير سالب")
+    if args.pump_threshold > 0 and not args.pump_timeframe:
+        p.error("يجب تحديد --pump-timeframe عند استخدام --pump-threshold")
 
     zone_type = args.zone_type
     if args.use_mother_bar:
@@ -9575,6 +9694,8 @@ def _parse_args_android():
         zone_type=zone_type,
         drop_last_incomplete=args.drop_last,
         max_scan=args.max_symbols,
+        pump_change_threshold=args.pump_threshold,
+        pump_timeframe=args.pump_timeframe,
     )
     return cfg, args
 
@@ -9587,6 +9708,18 @@ def _pick_symbols(cfg, symbol_override:str|None, max_symbols_hint:int):
     universe = [s for s in universe if not any(b in s for b in ban)]
     tickers = ex.fetch_tickers()
     ranked = sorted(universe, key=lambda s: float(tickers.get(s,{}).get("quoteVolume") or 0), reverse=True)
+    if cfg.pump_change_threshold > 0 and cfg.pump_timeframe:
+        pump_cache: Dict[str, Optional[float]] = {}
+
+        def pumped(sym: str) -> bool:
+            if sym not in pump_cache:
+                pump_cache[sym] = _fetch_percent_change(
+                    ex, sym, cfg.pump_timeframe, candles=2
+                )
+            change = pump_cache[sym]
+            return change is not None and change >= cfg.pump_change_threshold
+
+        ranked = [sym for sym in ranked if not pumped(sym)]
     if symbol_override:
         return [symbol_override if symbol_override in markets else symbol_override + ":USDT"]
     k = min(int(cfg.max_scan), max_symbols_hint or len(ranked))
