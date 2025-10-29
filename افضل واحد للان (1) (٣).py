@@ -8551,12 +8551,17 @@ def _detect_market_universe(exchange: "ccxt.binanceusdm") -> List[str]:
     ]
 
 
-def _pick_symbols(config: _ScannerConfig, symbol_override: Optional[str] = None) -> List[str]:
+def _pick_symbols(
+    config: _ScannerConfig,
+    symbol_override: Optional[str] = None,
+    *,
+    exchange: Optional["ccxt.binanceusdm"] = None,
+) -> List[str]:
     if symbol_override:
         return [symbol_override.strip().upper()]
     if ccxt is None:
         return []
-    exchange = _build_exchange()
+    exchange = exchange or _build_exchange()
     universe = _detect_market_universe(exchange)
     try:
         tickers = exchange.fetch_tickers(universe)
@@ -8657,7 +8662,11 @@ def _android_cli_entry() -> int:
         print("Missing core indicator dependency:", exc, file=sys.stderr)
         return 3
     exchange = _build_exchange()
-    symbols = _pick_symbols(config, symbol_override=(args.symbol or None))
+    symbols = _pick_symbols(
+        config,
+        symbol_override=(args.symbol or None),
+        exchange=exchange,
+    )
     if not symbols:
         print("لم يتم العثور على رموز مطابقة للمعايير المحددة", file=sys.stderr)
         return 4
@@ -8670,26 +8679,51 @@ def _android_cli_entry() -> int:
             pass
     for index, symbol in enumerate(symbols, 1):
         try:
-            candles = fetch_ohlcv(exchange, symbol, config.timeframe, config.limit)
+            raw_candles = exchange.fetch_ohlcv(
+                symbol,
+                timeframe=config.timeframe,
+                limit=config.limit,
+            )
         except Exception as exc:
-            print(f"[{index}/{len(symbols)}] {symbol}: تعذّر تنزيل البيانات ({exc})", file=sys.stderr)
+            print(
+                f"[{index}/{len(symbols)}] {symbol}: تعذّر تنزيل البيانات ({exc})",
+                file=sys.stderr,
+            )
             continue
+        if not raw_candles:
+            continue
+        candles: List[Dict[str, float]] = []
+        for entry in raw_candles:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 5:
+                continue
+            try:
+                time_val = int(entry[0])
+                open_val = float(entry[1])
+                high_val = float(entry[2])
+                low_val = float(entry[3])
+                close_val = float(entry[4])
+            except (TypeError, ValueError):
+                continue
+            try:
+                volume_val = float(entry[5]) if len(entry) > 5 else float("nan")
+            except (TypeError, ValueError):
+                volume_val = float("nan")
+            candles.append(
+                {
+                    "time": time_val,
+                    "open": open_val,
+                    "high": high_val,
+                    "low": low_val,
+                    "close": close_val,
+                    "volume": volume_val,
+                }
+            )
         if not candles:
             continue
         runtime = SmartMoneyAlgoProE5(inputs=inputs, base_timeframe=config.timeframe)
         runtime._bos_break_source = "Close"
         runtime._strict_close_for_break = True
-        runtime.process([
-            {
-                "time": c[0],
-                "open": c[1],
-                "high": c[2],
-                "low": c[3],
-                "close": c[4],
-                "volume": c[5] if len(c) > 5 else float("nan"),
-            }
-            for c in candles
-        ])
+        runtime.process(candles)
         metrics = runtime.gather_console_metrics()
         latest_events = metrics.get("latest_events") or {}
         recent_hits, _ = _collect_recent_event_hits(
